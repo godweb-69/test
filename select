@@ -1,0 +1,403 @@
+<?php
+require 'config.php';
+require 'header.php';
+
+$product_id = isset($_GET['id']) ? intval($_GET['id']) : 0;
+
+if (!$product_id) {
+    echo "<script>window.location.href='index.php';</script>";
+    exit;
+}
+
+try {
+    $product = $woocommerce->get("products/{$product_id}");
+
+    // If variable product, fetch all variations
+    $variations = [];
+    if ($product->type === 'variable') {
+        $variations = $woocommerce->get("products/{$product_id}/variations", ['per_page' => 100]);
+    }
+} catch (Exception $e) {
+    echo "<div class='container'><p>Product not found: " . $e->getMessage() . "</p></div>";
+    require 'footer.php';
+    exit;
+}
+?>
+
+<div class="product-page">
+    <div class="product-gallery">
+        <div class="main-image-wrapper">
+            <?php
+            $main_image = !empty($product->images) ? $product->images[0]->src : 'https://via.placeholder.com/600';
+            ?>
+            <img id="mainProductImage" src="<?php echo $main_image; ?>" alt="<?php echo $product->name; ?>">
+        </div>
+        <?php if (count($product->images) > 1): ?>
+            <div class="thumbnail-list">
+                <?php foreach ($product->images as $img): ?>
+                    <img src="<?php echo $img->src; ?>" class="thumbnail" onclick="changeImage('<?php echo $img->src; ?>')">
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
+    </div>
+
+    <div class="product-details">
+        <nav class="breadcrumb">
+            <a href="index.php">Home</a> &rsaquo; <span><?php echo $product->name; ?></span>
+        </nav>
+
+        <h1 class="product-title"><?php echo $product->name; ?></h1>
+
+        <div class="product-price" id="productPrice">
+            <?php echo $product->price_html; ?>
+        </div>
+
+        <div class="product-short-description">
+            <?php echo $product->short_description; ?>
+        </div>
+
+        <form action="cart.php" method="post" class="cart-form" id="addToCartForm">
+            <input type="hidden" name="action" value="add">
+            <input type="hidden" name="product_id" value="<?php echo $product->id; ?>">
+            <input type="hidden" name="variation_id" id="variation_id_input" value="">
+
+            <?php if ($product->type === 'variable' && !empty($product->attributes)): ?>
+                <div class="variations-wrapper">
+                    <?php foreach ($product->attributes as $attribute): ?>
+                        <?php if ($attribute->variation): ?>
+                            <div class="variation-row">
+                                <label><?php echo $attribute->name; ?>:</label>
+                                <select class="variation-select" data-attribute="<?php echo $attribute->name; ?>" required>
+                                    <option value="">Choose an option</option>
+                                    <?php foreach ($attribute->options as $option): ?>
+                                        <option value="<?php echo $option; ?>"><?php echo $option; ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                        <?php endif; ?>
+                    <?php endforeach; ?>
+                    <p id="variation-message" style="color: #d9534f; margin-top: 5px; font-weight: bold;"></p>
+                </div>
+            <?php endif; ?>
+
+            <div class="add-to-cart-actions">
+                <input type="number" name="quantity" value="1" min="1" max="10" class="qty-input">
+                <button type="submit" class="btn btn-primary btn-lg" id="addToCartBtn">Add to Cart</button>
+            </div>
+        </form>
+
+        <div class="product-meta">
+            <p><strong>SKU:</strong> <span id="productSku"><?php echo $product->sku; ?></span></p>
+            <?php if (!empty($product->categories)): ?>
+                <p><strong>Category:</strong>
+                    <?php
+                    $cats = array_map(function ($c) {
+                        return $c->name;
+                    }, $product->categories);
+                    echo implode(', ', $cats);
+                    ?>
+                </p>
+            <?php endif; ?>
+        </div>
+    </div>
+</div>
+
+<div class="product-full-description">
+    <h3>Description</h3>
+    <div class="tab-content">
+        <?php echo $product->description; ?>
+    </div>
+</div>
+
+<script>
+    const productType = "<?php echo $product->type; ?>";
+    const productVariations = <?php echo json_encode($variations); ?>;
+
+    function changeImage(src) {
+        document.getElementById('mainProductImage').src = src;
+    }
+
+    if (productType === 'variable') {
+        const selects = document.querySelectorAll('.variation-select');
+        const addToCartBtn = document.getElementById('addToCartBtn');
+        const variationInput = document.getElementById('variation_id_input');
+        const priceDisplay = document.getElementById('productPrice');
+        const mainImage = document.getElementById('mainProductImage');
+        const skuDisplay = document.getElementById('productSku');
+        const msg = document.getElementById('variation-message');
+
+        // Main entry point: specific listener for changes
+        selects.forEach(select => {
+            select.addEventListener('change', () => {
+                updateAvailability(); // 1. Update which options are enabled
+                checkFinalSelection(); // 2. Check if we have a full match
+            });
+        });
+
+        // Run once on load to disable invalid initial options
+        updateAvailability();
+        checkFinalSelection();
+
+        /**
+         * 1. Updates the availability (enabled/disabled) of all dropdown options 
+         * based on what is selected in other dropdowns.
+         */
+        function updateAvailability() {
+            // Loop through each dropdown (e.g., Color)
+            selects.forEach(targetSelect => {
+                const targetAttribute = targetSelect.dataset.attribute;
+
+                // Loop through each option in this dropdown (e.g., Red, Blue)
+                Array.from(targetSelect.options).forEach(option => {
+                    if (option.value === "") return; // Skip "Choose an option"
+
+                    // Build a "test" combination:
+                    // Take current selections of ALL OTHER dropdowns + THIS option
+                    const testAttributes = getCurrentSelections();
+                    testAttributes[targetAttribute] = option.value; // Overwrite/Set the attribute for this option
+
+                    // Check if any variation exists for this test combination
+                    console.log("Testing combination:", testAttributes);
+                    const isPossible = isCombinationPossible(testAttributes);
+
+                    // Update UI
+                    if (isPossible) {
+                        option.disabled = false;
+                        option.innerText = option.value;
+                    } else {
+                        option.disabled = true;
+                        option.innerText = option.value + " (Unavailable)";
+                    }
+                });
+            });
+        }
+
+        /**
+         * 2. Checks if the user has made a complete selection and updates the 
+         * Product Price, Image, and Add to Cart button.
+         */
+        function checkFinalSelection() {
+            const selected = getCurrentSelections();
+
+            // Allow adding to cart only if all dropdowns have a value
+            const allSelected = selects.length === Object.keys(selected).length &&
+                Object.values(selected).every(val => val !== "");
+
+            if (!allSelected) {
+                resetAddToCart("Please select an option");
+                return;
+            }
+
+            // Find the exact variation that matches ALL selected attributes
+            const match = productVariations.find(variation => {
+                return Object.keys(selected).every(key => {
+                    // Find the attribute in the variation (e.g., variation has "Color": "Red")
+                    const attr = variation.attributes.find(a => a.name === key);
+                    return attr && attr.option === selected[key];
+                });
+            });
+
+            if (match) {
+                updateProductDetails(match);
+            } else {
+                resetAddToCart("Sorry, this combination is unavailable.");
+            }
+        }
+
+        /**
+         * Helper: Returns an object with the current values of all dropdowns
+         * e.g., { "Color": "Red", "Size": "" }
+         */
+        function getCurrentSelections() {
+            const selected = {};
+            selects.forEach(s => {
+                if (s.value) selected[s.dataset.attribute] = s.value;
+            });
+            console.log("Current Selections:", selected);
+            return selected;
+        }
+
+        /**
+         * Helper: Returns true if ANY available variation matches the subset of attributes provided.
+         * Used to check if an option should be enabled or disabled.
+         */
+        function isCombinationPossible(testAttributes) {
+            return productVariations.some(variation => {
+                // Check if this variation matches all the attributes in our test set
+                return Object.keys(testAttributes).every(key => {
+                    // Check if the variation has this attribute and it matches
+                    const attr = variation.attributes.find(a => a.name === key);
+                    return attr && attr.option === testAttributes[key];
+                });
+            });
+        }
+
+        /**
+         * Helper: Updates the page elements when a valid variation is found
+         */
+        function updateProductDetails(variation) {
+            variationInput.value = variation.id;
+
+            // Update Price
+            priceDisplay.innerHTML = variation.price_html || ('$' + parseFloat(variation.price).toFixed(2));
+
+            // Update Image
+            if (variation.image && variation.image.src) {
+                mainImage.src = variation.image.src;
+            }
+            // Update SKU
+            if (variation.sku) {
+                skuDisplay.innerText = variation.sku;
+            }
+
+            // Enable Button
+            addToCartBtn.disabled = false;
+            addToCartBtn.innerText = "Add to Cart";
+            msg.innerText = "";
+        }
+
+        /**
+         * Helper: Disables the add to cart button and shows a message
+         */
+        function resetAddToCart(message) {
+            addToCartBtn.disabled = true;
+            addToCartBtn.innerText = "Unavailable";
+            variationInput.value = "";
+            if (message && message !== "Please select an option") {
+                msg.innerText = message;
+            } else {
+                msg.innerText = "";
+            }
+        }
+    }
+    // if (productType === 'variable') {
+
+    //     const selects = document.querySelectorAll('.variation-select');
+    //     const addBtn = document.getElementById('addToCartBtn');
+    //     const variationInput = document.getElementById('variation_id_input');
+    //     const priceBox = document.getElementById('productPrice');
+    //     const imageBox = document.getElementById('mainProductImage');
+    //     const skuBox = document.getElementById('productSku');
+    //     const messageBox = document.getElementById('variation-message');
+
+    //     // When user changes any dropdown
+    //     selects.forEach(select => {
+    //         select.addEventListener('change', handleSelectionChange);
+    //     });
+
+    //     // Run once on page load
+    //     handleSelectionChange();
+
+    //     // Main function
+    //     function handleSelectionChange() {
+
+    //         const selected = getSelectedValues();
+
+    //         updateOptions(selected);
+
+    //         const match = findExactMatch(selected);
+
+    //         if (match) {
+    //             applyVariation(match);
+    //         } else {
+    //             disableAddToCart();
+    //         }
+    //     }
+
+    //     // Get selected values
+    //     function getSelectedValues() {
+
+    //         const data = {};
+
+    //         selects.forEach(select => {
+    //             if (select.value !== "") {
+    //                 data[select.dataset.attribute] = select.value;
+    //             }
+    //         });
+
+    //         return data;
+    //     }
+
+    //     // Enable/Disable options
+    //     function updateOptions(selected) {
+
+    //         selects.forEach(select => {
+
+    //             const attributeName = select.dataset.attribute;
+
+    //             Array.from(select.options).forEach(option => {
+
+    //                 if (option.value === "") return;
+
+    //                 const test = {
+    //                     ...selected
+    //                 };
+    //                 test[attributeName] = option.value;
+
+    //                 option.disabled = !isValidCombination(test);
+
+    //             });
+    //         });
+    //     }
+
+    //     // Check if combination exists (partial match allowed)
+    //     function isValidCombination(testData) {
+
+    //         return productVariations.some(variation => {
+
+    //             return Object.keys(testData).every(key => {
+
+    //                 const attr = variation.attributes.find(a => a.name === key);
+    //                 return attr && attr.option === testData[key];
+
+    //             });
+
+    //         });
+    //     }
+
+    //     // Find full exact match
+    //     function findExactMatch(selected) {
+
+    //         if (Object.keys(selected).length !== selects.length) {
+    //             return null;
+    //         }
+
+    //         return productVariations.find(variation => {
+
+    //             return variation.attributes.every(attr => {
+    //                 return selected[attr.name] === attr.option;
+    //             });
+
+    //         });
+    //     }
+
+    //     // Apply variation details
+    //     function applyVariation(variation) {
+
+    //         variationInput.value = variation.id;
+
+    //         priceBox.innerHTML = variation.price_html;
+    //         skuBox.innerText = variation.sku;
+
+    //         if (variation.image && variation.image.src) {
+    //             imageBox.src = variation.image.src;
+    //         }
+
+    //         addBtn.disabled = false;
+    //         addBtn.innerText = "Add to Cart";
+    //         messageBox.innerText = "";
+    //     }
+
+    //     // Disable button
+    //     function disableAddToCart() {
+
+    //         variationInput.value = "";
+    //         addBtn.disabled = true;
+    //         addBtn.innerText = "Unavailable";
+    //     }
+
+    // }
+</script>
+
+
+<?php require 'footer.php'; ?>
